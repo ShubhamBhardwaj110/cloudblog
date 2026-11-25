@@ -25,3 +25,5 @@ frontend/public/config.json
 .vscode/
 infra/envs/prod/.build/
 .scripts-dist/
+plan.txt
+apply.log
