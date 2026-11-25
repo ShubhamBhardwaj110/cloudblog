@@ -152,7 +152,7 @@ export default function PostPage() {
                 <time dateTime={post.publishedAt}>{formatDate(post.publishedAt)}</time>
                 <span className="dot" />
                 <span>{post.readingMinutes} min read</span>
-                {shownViews > 0 && (<><span className="dot" /><span>{formatCount(shownViews)} views</span></>)}
+                {shownViews > 0 && (<><span className="dot" /><span>{formatCount(shownViews)} {shownViews === 1 ? 'view' : 'views'}</span></>)}
               </div>
             </div>
             {(isAdmin || me?.profile.userId === post.authorId) && (
