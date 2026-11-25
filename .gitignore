@@ -1,0 +1,27 @@
+node_modules/
+dist/
+coverage/
+*.log
+.env
+.env.*
+!.env.example
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+crash.log
+*.auto.tfvars
+terraform.tfvars
+backend.hcl
+.terraform.lock.hcl.bak
+
+# Local runtime config written by scripts
+frontend/public/config.json
+
+.DS_Store
+.vscode/
+infra/envs/prod/.build/
+.scripts-dist/

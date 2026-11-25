@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches-ignore: [main] # main is covered by deploy.yml
+
+permissions:
+  contents: read
+  id-token: write # OIDC → read-only AWS role for terraform plan
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TF_VERSION: 1.16.2
+
+jobs:
+  app:
+    name: Typecheck, test, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  terraform:
+    name: Terraform fmt, validate, plan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - run: terraform fmt -check -recursive infra
+
+      - name: Validate
+        run: |
+          for d in infra/bootstrap infra/envs/prod; do
+            terraform -chdir=$d init -backend=false -input=false >/dev/null
+            terraform -chdir=$d validate
+          done
+
+      # The plan needs AWS access; skipped until the repo variables from the README are set.
+      - name: Build Lambda bundles (needed by the plan)
+        if: vars.AWS_PLAN_ROLE_ARN != ''
+        run: npm ci && npm run build -w backend
+
+      - uses: aws-actions/configure-aws-credentials@v5
+        if: vars.AWS_PLAN_ROLE_ARN != ''
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Plan
+        if: vars.AWS_PLAN_ROLE_ARN != ''
+        working-directory: infra/envs/prod
+        env:
+          TF_VAR_admin_email: ${{ secrets.ADMIN_EMAIL }}
+        run: |
+          terraform init -input=false -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
+          terraform plan -input=false -lock=false -no-color -out=tfplan | tee plan.txt
+          {
+            echo '### Terraform plan'
+            echo '```'
+            grep -E '^(Plan:|No changes|  # )' plan.txt || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

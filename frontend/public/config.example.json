@@ -1,0 +1,9 @@
+{
+  "apiUrl": "https://xxxxxxxxxx.execute-api.us-east-1.amazonaws.com",
+  "region": "us-east-1",
+  "userPoolId": "us-east-1_XXXXXXXXX",
+  "clientId": "xxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "cognitoDomain": "https://cloudblog-123456789012.auth.us-east-1.amazoncognito.com",
+  "siteTitle": "CloudBlog",
+  "siteTagline": "Stories, notes and ideas, served from the edge."
+}

@@ -1,0 +1,19 @@
+{
+  "name": "cloudblog",
+  "private": true,
+  "version": "2.0.0",
+  "description": "Serverless blog on AWS: React + Lambda + DynamoDB + CloudFront, managed with Terraform",
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "npm run build -w backend && npm run build -w frontend",
+    "test": "npm test -w backend && npm test -w frontend",
+    "typecheck": "npm run typecheck -w backend && npm run typecheck -w frontend",
+    "dev": "npm run dev -w frontend"
+  }
+}
