@@ -2,7 +2,8 @@
 #   - S3 bucket for Terraform remote state (native S3 locking, no DynamoDB lock table)
 #   - GitHub Actions OIDC provider + two roles, so CI needs no long-lived AWS keys
 #
-#   cd infra/bootstrap && terraform init && terraform apply -var github_repo=OWNER/REPO
+#   cd infra/bootstrap && terraform init && terraform apply \
+#     -var github_repo=OWNER/REPO -var github_owner_id=123 -var github_repo_id=456
 
 terraform {
   required_version = ">= 1.10"
@@ -18,6 +19,20 @@ variable "github_repo" {
     condition     = can(regex("^[\\w.-]+/[\\w.-]+$", var.github_repo))
     error_message = "Use the form owner/name."
   }
+}
+
+# GitHub's OIDC subject may embed immutable numeric IDs ("repo:owner@123/name@456:...").
+# Get them with: gh api repos/OWNER/REPO --jq '"\(.owner.id) \(.id)"'
+variable "github_owner_id" {
+  type        = string
+  default     = ""
+  description = "Numeric GitHub user/org ID of the repo owner."
+}
+
+variable "github_repo_id" {
+  type        = string
+  default     = ""
+  description = "Numeric GitHub repository ID."
 }
 
 variable "project" {
@@ -40,6 +55,12 @@ provider "aws" {
 data "aws_caller_identity" "current" {}
 
 locals {
+  owner_repo = split("/", var.github_repo)
+  # Both subject formats: classic "owner/repo" and ID-pinned "owner@id/repo@id" (rename-proof).
+  repo_subjects = compact([
+    "repo:${var.github_repo}",
+    var.github_owner_id != "" && var.github_repo_id != "" ? "repo:${local.owner_repo[0]}@${var.github_owner_id}/${local.owner_repo[1]}@${var.github_repo_id}" : "",
+  ])
   account_id   = data.aws_caller_identity.current.account_id
   state_bucket = "${var.project}-tfstate-${local.account_id}"
 }
@@ -127,7 +148,7 @@ data "aws_iam_policy_document" "trust_deploy" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repo}:environment:production"]
+      values   = [for r in local.repo_subjects : "${r}:environment:production"]
     }
   }
 }
@@ -147,7 +168,7 @@ data "aws_iam_policy_document" "trust_plan" {
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repo}:pull_request", "repo:${var.github_repo}:ref:refs/heads/*"]
+      values   = flatten([for r in local.repo_subjects : ["${r}:pull_request", "${r}:ref:refs/heads/*"]])
     }
   }
 }

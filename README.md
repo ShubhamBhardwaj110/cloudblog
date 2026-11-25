@@ -67,7 +67,8 @@ npm ci && npm run build -w backend
 # 1. Bootstrap: state bucket + GitHub OIDC roles (local state, run once)
 cd infra/bootstrap
 terraform init
-terraform apply -var github_repo=<owner>/<repo>
+terraform apply -var github_repo=<owner>/<repo> \
+  -var github_owner_id=<id> -var github_repo_id=<id>   # gh api repos/<owner>/<repo> --jq '"\(.owner.id) \(.id)"'
 
 # 2. Application stack
 cd ../envs/prod
