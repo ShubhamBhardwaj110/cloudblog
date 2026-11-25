@@ -1,52 +1,44 @@
-import { randomUUID } from 'node:crypto';
+import {
+  AdminDisableUserCommand,
+  AdminEnableUserCommand,
+  AdminUserGlobalSignOutCommand,
+  CognitoIdentityProviderClient,
+} from '@aws-sdk/client-cognito-identity-provider';
 import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
-import { S3Client } from '@aws-sdk/client-s3';
-import { createPresignedPost } from '@aws-sdk/s3-presigned-post';
-import type { APIGatewayProxyEventV2WithJWTAuthorizer } from 'aws-lambda';
+import { getUser, requireAdmin } from '../lib/auth.js';
 import * as comments from '../lib/comments.js';
 import { env } from '../lib/env.js';
-import { type ApiEvent, HttpError, json, notFound, parseBody, query, router } from '../lib/http.js';
-import {
-  type CommentStatus,
-  commentModerationSchema,
-  EXTENSIONS,
-  MAX_UPLOAD_BYTES,
-  postInputSchema,
-  uploadRequestSchema,
-} from '../lib/models.js';
+import { type ApiEvent, HttpError, json, router } from '../lib/http.js';
+import { publicComment } from '../lib/models.js';
 import * as posts from '../lib/posts.js';
+import * as profiles from '../lib/profiles.js';
 import * as views from '../lib/views.js';
 
-const s3 = new S3Client({});
 const lambda = new LambdaClient({});
-const NO_STORE = { 'cache-control': 'no-store' };
+const cognito = new CognitoIdentityProviderClient({});
+const ok = (body: unknown, status = 200) => json(status, body, { 'cache-control': 'no-store' });
 
-/**
- * API Gateway's JWT authorizer has already verified the token signature,
- * issuer, audience and expiry. We additionally require the admins group,
- * so a future non-admin user in the pool can't reach these routes.
- */
-function requireAdmin(event: ApiEvent): void {
-  const claims = (event as APIGatewayProxyEventV2WithJWTAuthorizer).requestContext.authorizer?.jwt?.claims ?? {};
-  const raw = claims['cognito:groups'];
-  const groups = Array.isArray(raw) ? raw.map(String) : String(raw ?? '').replace(/^\[|\]$/g, '').split(/[\s,]+/);
-  if (!groups.includes(env.adminGroup)) throw new HttpError(403, 'Admin access required');
-}
-
-const ok = (body: unknown, status = 200) => json(status, body, NO_STORE);
-
+/** Site-wide moderation. Every route requires the Cognito "admins" group. */
 const routes = router({
   'GET /admin/stats': async () => {
-    const [all, viewMap, pending] = await Promise.all([posts.listAll(), views.all(), comments.countByStatus('pending')]);
+    const [all, viewMap, users] = await Promise.all([posts.listAll(), views.all(), profiles.listAll()]);
     const byStatus = { draft: 0, published: 0, scheduled: 0 };
     for (const p of all) byStatus[p.status]++;
     const top = all
       .filter((p) => p.status === 'published')
-      .map((p) => ({ postId: p.postId, title: p.title, slug: p.slug, views: viewMap.get(p.postId) ?? 0 }))
+      .map((p) => ({ postId: p.postId, title: p.title, slug: p.slug, author: p.author, views: viewMap.get(p.postId) ?? 0 }))
       .sort((a, b) => b.views - a.views)
       .slice(0, 5);
-    const totalViews = [...viewMap.values()].reduce((a, b) => a + b, 0);
-    return ok({ posts: byStatus, totalPosts: all.length, totalViews, pendingComments: pending, topPosts: top });
+    const weekAgo = new Date(Date.now() - 7 * 864e5).toISOString();
+    return ok({
+      posts: byStatus,
+      totalPosts: all.length,
+      totalViews: [...viewMap.values()].reduce((a, b) => a + b, 0),
+      users: users.length,
+      newUsersThisWeek: users.filter((u) => u.createdAt >= weekAgo).length,
+      suspendedUsers: users.filter((u) => u.status === 'suspended').length,
+      topPosts: top,
+    });
   },
 
   'GET /admin/posts': async () => {
@@ -54,56 +46,44 @@ const routes = router({
     return ok({ posts: all.map((p) => ({ ...p, views: viewMap.get(p.postId) ?? 0 })) });
   },
 
-  'GET /admin/posts/{postId}': async (_e, { postId }) => {
-    const post = await posts.getById(postId!);
-    if (!post) throw notFound('Post');
-    return ok({ post });
+  'POST /admin/posts/{postId}/unpublish': async (_e, { postId }) => {
+    await posts.unpublish(postId!);
+    return ok({ status: 'draft' });
   },
 
-  'POST /admin/posts': async (event) => ok({ post: await posts.create(parseBody(event, postInputSchema)) }, 201),
-
-  'PUT /admin/posts/{postId}': async (event, { postId }) =>
-    ok({ post: await posts.update(postId!, parseBody(event, postInputSchema)) }),
-
-  // Comments, view counts and the static page are cleaned up by the publisher's stream handler.
   'DELETE /admin/posts/{postId}': async (_e, { postId }) => {
     await posts.remove(postId!);
     return ok({ deleted: postId });
   },
 
-  'GET /admin/comments': async (event) => {
-    const status = (query(event, 'status') ?? 'pending') as CommentStatus;
-    if (status !== 'pending' && status !== 'approved') throw new HttpError(400, 'status must be pending or approved');
-    return ok({ comments: await comments.listByStatus(status) });
-  },
+  'GET /admin/comments': async () => ok({ comments: (await comments.listRecent()).map((c) => ({ ...publicComment(c), postId: c.postId, postSlug: c.postSlug, postTitle: c.postTitle })) }),
 
-  'PATCH /admin/comments/{postId}/{commentKey}': async (event, { postId, commentKey }) => {
-    const { status } = parseBody(event, commentModerationSchema);
-    return ok({ comment: await comments.setStatus(postId!, commentKey!, status) });
-  },
-
-  'DELETE /admin/comments/{postId}/{commentKey}': async (_e, { postId, commentKey }) => {
-    await comments.remove(postId!, commentKey!);
-    return ok({ deleted: commentKey });
+  'GET /admin/users': async () => {
+    const [users, all] = await Promise.all([profiles.listAll(), posts.listAll()]);
+    const counts = new Map<string, number>();
+    for (const p of all) counts.set(p.authorId, (counts.get(p.authorId) ?? 0) + 1);
+    return ok({ users: users.map((u) => ({ ...u, postCount: counts.get(u.userId) ?? 0 })) });
   },
 
   /**
-   * Browser uploads straight to S3 with a short-lived presigned POST.
-   * S3 itself enforces the size limit and content type, so the Lambda
-   * never handles image bytes (no payload limits, no extra cost).
+   * Suspend: block sign-in, revoke refresh tokens, and take every post offline.
+   * Existing ID tokens expire within the hour, and writes are refused meanwhile
+   * because the profile is marked suspended.
    */
-  'POST /admin/uploads': async (event) => {
-    const { contentType } = parseBody(event, uploadRequestSchema);
-    const now = new Date();
-    const key = `media/images/${now.getUTCFullYear()}/${String(now.getUTCMonth() + 1).padStart(2, '0')}/${randomUUID()}.${EXTENSIONS[contentType]}`;
-    const { url, fields } = await createPresignedPost(s3, {
-      Bucket: env.mediaBucket,
-      Key: key,
-      Conditions: [['content-length-range', 1, MAX_UPLOAD_BYTES]],
-      Fields: { 'Content-Type': contentType, 'Cache-Control': 'public, max-age=31536000, immutable' },
-      Expires: 300,
-    });
-    return ok({ url, fields, publicUrl: `${env.mediaBaseUrl}/${key}` });
+  'POST /admin/users/{userId}/suspend': async (e, { userId }) => {
+    if (userId === getUser(e).sub) throw new HttpError(400, "You can't suspend yourself");
+    const profile = await profiles.setStatus(userId!, 'suspended');
+    await cognito.send(new AdminDisableUserCommand({ UserPoolId: env.userPoolId, Username: userId }));
+    await cognito.send(new AdminUserGlobalSignOutCommand({ UserPoolId: env.userPoolId, Username: userId }));
+    const theirs = await posts.listByAuthor(userId!);
+    for (const p of theirs) if (p.status !== 'draft') await posts.unpublish(p.postId);
+    return ok({ user: profile, unpublished: theirs.filter((p) => p.status !== 'draft').length });
+  },
+
+  'POST /admin/users/{userId}/unsuspend': async (_e, { userId }) => {
+    const profile = await profiles.setStatus(userId!, 'active');
+    await cognito.send(new AdminEnableUserCommand({ UserPoolId: env.userPoolId, Username: userId }));
+    return ok({ user: profile });
   },
 
   'POST /admin/rebuild': async () => {
@@ -120,7 +100,7 @@ const routes = router({
 
 export const handler = async (event: ApiEvent) => {
   try {
-    requireAdmin(event);
+    requireAdmin(getUser(event));
   } catch (err) {
     return json((err as HttpError).status ?? 403, { error: (err as Error).message });
   }

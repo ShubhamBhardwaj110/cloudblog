@@ -6,6 +6,7 @@ import { Search } from '../components/Icons';
 import { usePageMeta } from '../components/ui';
 import { publicApi } from '../lib/api';
 import { config } from '../lib/config';
+import { useSession } from '../lib/session';
 
 export const postsQuery = { queryKey: ['posts'], queryFn: ({ signal }: { signal: AbortSignal }) => publicApi.posts(signal) };
 
@@ -17,6 +18,7 @@ export default function Home() {
   const tag = params.get('tag');
   const query = useDeferredValue(q.trim().toLowerCase());
   const { siteTagline } = config();
+  const { isSignedIn, signIn } = useSession();
   usePageMeta(undefined, siteTagline);
 
   const set = (key: string, value: string | null) => {
@@ -38,7 +40,7 @@ export default function Home() {
         (p) =>
           (!category || p.category === category) &&
           (!tag || p.tags.includes(tag)) &&
-          (!query || `${p.title} ${p.excerpt} ${p.tags.join(' ')} ${p.category}`.toLowerCase().includes(query)),
+          (!query || `${p.title} ${p.excerpt} ${p.tags.join(' ')} ${p.category} ${p.author} ${p.authorHandle}`.toLowerCase().includes(query)),
       ),
     [posts, category, tag, query],
   );
@@ -51,9 +53,15 @@ export default function Home() {
     <div className="container">
       <section className="hero">
         <h1>
-          Notes from the <em>cloud</em>, written by hand.
+          Ideas worth reading, from <em>writers</em> like you.
         </h1>
         <p>{siteTagline}</p>
+        {!isSignedIn && (
+          <div style={{ display: 'flex', gap: 10, marginTop: 28, flexWrap: 'wrap' }}>
+            <button className="btn btn-primary" onClick={() => void signIn('/studio/new')}>Start writing, it’s free</button>
+            <button className="btn" onClick={() => void signIn()}>Sign in</button>
+          </div>
+        )}
       </section>
 
       <div className="toolbar">

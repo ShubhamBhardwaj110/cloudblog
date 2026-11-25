@@ -3,6 +3,8 @@ locals {
     POSTS_TABLE      = aws_dynamodb_table.posts.name
     COMMENTS_TABLE   = aws_dynamodb_table.comments.name
     VIEWS_TABLE      = aws_dynamodb_table.views.name
+    PROFILES_TABLE   = aws_dynamodb_table.profiles.name
+    HANDLES_TABLE    = aws_dynamodb_table.handles.name
     SITE_URL         = local.site_url
     SITE_TITLE       = var.site_title
     SITE_DESCRIPTION = var.site_description
@@ -11,7 +13,7 @@ locals {
   comments_arns = [aws_dynamodb_table.comments.arn, "${aws_dynamodb_table.comments.arn}/index/*"]
 }
 
-# ---------- Public API: read posts, count views, submit comments ----------
+# ---------- Public API: anonymous reads + view counter ----------
 
 data "aws_iam_policy_document" "public" {
   statement {
@@ -19,7 +21,7 @@ data "aws_iam_policy_document" "public" {
     resources = local.posts_arns
   }
   statement {
-    actions   = ["dynamodb:Query", "dynamodb:PutItem"]
+    actions   = ["dynamodb:Query"]
     resources = [aws_dynamodb_table.comments.arn]
   }
   statement {
@@ -27,39 +29,87 @@ data "aws_iam_policy_document" "public" {
     resources = [aws_dynamodb_table.views.arn]
   }
   statement {
-    actions   = ["sns:Publish"]
-    resources = [aws_sns_topic.alerts.arn]
+    actions   = ["dynamodb:GetItem"]
+    resources = [aws_dynamodb_table.profiles.arn, aws_dynamodb_table.handles.arn]
   }
 }
 
 module "public_api" {
   source      = "../../modules/lambda"
   name        = "${local.name}-public-api"
-  description = "Public read API and comment submission"
+  description = "Anonymous read API"
   source_dir  = "${var.lambda_dist_dir}/public"
   policy_json = data.aws_iam_policy_document.public.json
-  environment = merge(local.common_env, { ALERTS_TOPIC_ARN = aws_sns_topic.alerts.arn })
+  environment = local.common_env
 }
 
-# ---------- Admin API: CRUD posts, moderate comments, presign uploads ----------
+# ---------- App API: any signed-in user (own profile, own posts, comments, reports) ----------
 
-data "aws_iam_policy_document" "admin" {
+data "aws_iam_policy_document" "app" {
   statement {
-    actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem", "dynamodb:Query", "dynamodb:Scan", "dynamodb:UpdateItem"]
+    actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem", "dynamodb:Query", "dynamodb:UpdateItem"]
     resources = local.posts_arns
   }
   statement {
-    actions   = ["dynamodb:Query", "dynamodb:UpdateItem", "dynamodb:DeleteItem"]
+    actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem", "dynamodb:Query"]
+    resources = [aws_dynamodb_table.comments.arn]
+  }
+  statement {
+    actions   = ["dynamodb:BatchGetItem"]
+    resources = [aws_dynamodb_table.views.arn]
+  }
+  # Profile + handle changes are transactional (TransactWriteItems needs per-table Put/Delete/Condition rights).
+  statement {
+    actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem", "dynamodb:ConditionCheckItem"]
+    resources = [aws_dynamodb_table.profiles.arn, aws_dynamodb_table.handles.arn]
+  }
+  # Presigned POSTs are signed with this role; uploads are confined to media/u/<userId>/...
+  statement {
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.this["media"].arn}/media/u/*"]
+  }
+  statement {
+    actions   = ["sns:Publish"]
+    resources = [aws_sns_topic.alerts.arn]
+  }
+}
+
+module "app_api" {
+  source      = "../../modules/lambda"
+  name        = "${local.name}-app-api"
+  description = "Signed-in user API: profile, writing, comments, reports"
+  source_dir  = "${var.lambda_dist_dir}/app"
+  policy_json = data.aws_iam_policy_document.app.json
+  environment = merge(local.common_env, {
+    MEDIA_BUCKET     = aws_s3_bucket.this["media"].bucket
+    MEDIA_BASE_URL   = local.site_url
+    ALERTS_TOPIC_ARN = aws_sns_topic.alerts.arn
+    ADMIN_GROUP      = aws_cognito_user_group.admins.name
+  })
+}
+
+# ---------- Admin API: moderation (admins group only) ----------
+
+data "aws_iam_policy_document" "admin" {
+  statement {
+    actions   = ["dynamodb:GetItem", "dynamodb:DeleteItem", "dynamodb:Query", "dynamodb:Scan", "dynamodb:UpdateItem"]
+    resources = local.posts_arns
+  }
+  statement {
+    actions   = ["dynamodb:Query"]
     resources = local.comments_arns
   }
   statement {
-    actions   = ["dynamodb:Scan", "dynamodb:GetItem"]
+    actions   = ["dynamodb:Scan"]
     resources = [aws_dynamodb_table.views.arn]
   }
-  # Presigned POSTs are signed with this role, so it needs the PutObject it delegates.
   statement {
-    actions   = ["s3:PutObject"]
-    resources = ["${aws_s3_bucket.this["media"].arn}/media/images/*"]
+    actions   = ["dynamodb:Scan", "dynamodb:GetItem", "dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.profiles.arn]
+  }
+  statement {
+    actions   = ["cognito-idp:AdminDisableUser", "cognito-idp:AdminEnableUser", "cognito-idp:AdminUserGlobalSignOut"]
+    resources = [aws_cognito_user_pool.users.arn]
   }
   statement {
     actions   = ["lambda:InvokeFunction"]
@@ -70,14 +120,13 @@ data "aws_iam_policy_document" "admin" {
 module "admin_api" {
   source      = "../../modules/lambda"
   name        = "${local.name}-admin-api"
-  description = "Authenticated admin API"
+  description = "Admin moderation API"
   source_dir  = "${var.lambda_dist_dir}/admin"
   policy_json = data.aws_iam_policy_document.admin.json
   environment = merge(local.common_env, {
-    MEDIA_BUCKET       = aws_s3_bucket.this["media"].bucket
-    MEDIA_BASE_URL     = local.site_url
     PUBLISHER_FUNCTION = module.publisher.function_name
     ADMIN_GROUP        = aws_cognito_user_group.admins.name
+    USER_POOL_ID       = aws_cognito_user_pool.users.id
   })
 }
 

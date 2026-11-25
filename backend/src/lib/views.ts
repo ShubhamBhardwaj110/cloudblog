@@ -1,4 +1,4 @@
-import { DeleteCommand, GetCommand, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { BatchGetCommand, DeleteCommand, GetCommand, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ddb } from './db.js';
 import { env } from './env.js';
 
@@ -38,4 +38,14 @@ export async function all(): Promise<Map<string, number>> {
 
 export async function remove(postId: string): Promise<void> {
   await ddb.send(new DeleteCommand({ TableName: env.viewsTable, Key: { postId } }));
+}
+
+export async function many(postIds: string[]): Promise<Map<string, number>> {
+  const map = new Map<string, number>();
+  for (let i = 0; i < postIds.length; i += 100) {
+    const keys = postIds.slice(i, i + 100).map((postId) => ({ postId }));
+    const res = await ddb.send(new BatchGetCommand({ RequestItems: { [env.viewsTable]: { Keys: keys } } }));
+    for (const item of res.Responses?.[env.viewsTable] ?? []) map.set(item.postId as string, Number(item.views ?? 0));
+  }
+  return map;
 }

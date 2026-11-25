@@ -1,26 +1,26 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
-import { useAuth } from 'react-oidc-context';
 import { Link, useBlocker, useNavigate, useParams } from 'react-router';
 import { ArrowLeft, External, ImageIcon, Trash } from '../components/Icons';
 import { Spinner, usePageMeta, useToast } from '../components/ui';
-import { ApiError, type Post, type PostInput, type PostStatus } from '../lib/api';
+import { errorMessage, type Post, type PostInput, type PostStatus } from '../lib/api';
 import { formatDateTime, fromLocalInput, toLocalInput } from '../lib/format';
 import MarkdownEditor from './MarkdownEditor';
-import { StatusPill } from './PostsList';
-import { useAdminApi, useInvalidate } from './useAdminApi';
+import { useSession } from '../lib/session';
+import { useInvalidate } from './hooks';
+import { StatusPill } from './MyPosts';
 
 const slugify = (s: string) =>
   s.normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80);
 
-const empty = (author: string): PostInput => ({
+const empty = (): PostInput => ({
   title: '', slug: '', excerpt: '', content: '', coverImage: '', coverAlt: '',
-  category: 'General', tags: [], author, status: 'draft', publishedAt: undefined, featured: false,
+  category: 'General', tags: [], status: 'draft', publishedAt: undefined, featured: false,
 });
 
 const fromPost = (p: Post): PostInput => ({
   title: p.title, slug: p.slug, excerpt: p.excerpt, content: p.content, coverImage: p.coverImage ?? '', coverAlt: p.coverAlt ?? '',
-  category: p.category, tags: p.tags, author: p.author, status: p.status, publishedAt: p.publishedAt, featured: p.featured,
+  category: p.category, tags: p.tags, status: p.status, publishedAt: p.publishedAt, featured: p.featured,
 });
 
 function TagInput({ value, onChange }: { value: string[]; onChange: (t: string[]) => void }) {
@@ -53,22 +53,21 @@ function TagInput({ value, onChange }: { value: string[]; onChange: (t: string[]
 export default function Editor() {
   const { postId } = useParams();
   const isNew = !postId;
-  const api = useAdminApi();
-  const auth = useAuth();
+  const { api: maybeApi, me, isAdmin } = useSession();
+  const api = maybeApi!;
   const toast = useToast();
   const invalidate = useInvalidate();
   const navigate = useNavigate();
   const coverInput = useRef<HTMLInputElement>(null);
 
-  const defaultAuthor = (auth.user?.profile.name as string) || (auth.user?.profile.email?.split('@')[0] ?? 'Admin');
-  const [form, setForm] = useState<PostInput>(() => empty(defaultAuthor));
-  const [baseline, setBaseline] = useState(() => JSON.stringify(empty(defaultAuthor)));
+  const [form, setForm] = useState<PostInput>(empty);
+  const [baseline, setBaseline] = useState(() => JSON.stringify(empty()));
   const [slugTouched, setSlugTouched] = useState(!isNew);
   const [saved, setSaved] = useState<Post>();
   const [coverUploading, setCoverUploading] = useState(false);
 
   const { data: existing, isPending: loading, error: loadError } = useQuery({
-    queryKey: ['admin', 'post', postId],
+    queryKey: ['studio', 'post', postId],
     queryFn: () => api.post(postId!),
     enabled: !isNew,
   });
@@ -101,12 +100,9 @@ export default function Editor() {
       setSaved(post);
       invalidate();
       toast(post.status === 'published' ? 'Published. The static page will be live in a few seconds.' : post.status === 'scheduled' ? `Scheduled for ${formatDateTime(post.publishedAt)}` : 'Draft saved');
-      if (isNew) navigate(`/admin/posts/${post.postId}`, { replace: true });
+      if (isNew) navigate(`/studio/posts/${post.postId}`, { replace: true });
     },
-    onError: (e) => {
-      const err = e as ApiError;
-      toast(err.details?.length ? `${err.details[0]!.field}: ${err.details[0]!.message}` : err.message, 'error');
-    },
+    onError: (e) => toast(errorMessage(e), 'error'),
   });
 
   const submit = (status: PostStatus = form.status) => {
@@ -137,7 +133,7 @@ export default function Editor() {
     window.addEventListener('beforeunload', onUnload);
     return () => window.removeEventListener('beforeunload', onUnload);
   }, [dirty]);
-  const blocker = useBlocker(({ currentLocation, nextLocation }) => dirty && !save.isPending && currentLocation.pathname !== nextLocation.pathname && !(isNew && nextLocation.pathname.startsWith('/admin/posts/')));
+  const blocker = useBlocker(({ currentLocation, nextLocation }) => dirty && !save.isPending && currentLocation.pathname !== nextLocation.pathname && !(isNew && nextLocation.pathname.startsWith('/studio/posts/')));
   useEffect(() => {
     if (blocker.state === 'blocked') {
       if (confirm('You have unsaved changes. Leave anyway?')) blocker.proceed();
@@ -158,6 +154,7 @@ export default function Editor() {
   };
 
   if (!isNew && loading) return <Spinner label="Loading post" />;
+  if (me?.profile.status === 'suspended') return <div className="alert alert-error">Suspended accounts can’t write or edit posts.</div>;
   if (loadError) return <div className="alert alert-error">{(loadError as Error).message}</div>;
 
   const live = saved?.status === 'published';
@@ -166,7 +163,7 @@ export default function Editor() {
   return (
     <>
       <div className="admin-head">
-        <Link to="/admin/posts" className="btn btn-ghost btn-sm"><ArrowLeft size={15} /> All posts</Link>
+        <Link to="/studio/posts" className="btn btn-ghost btn-sm"><ArrowLeft size={15} /> My posts</Link>
         <div className="actions" style={{ alignItems: 'center' }}>
           <span className="hint">{dirty ? <><span className="dirty-dot" />Unsaved changes</> : saved ? `Saved ${formatDateTime(saved.updatedAt)}` : ''}</span>
           {live && <a className="btn btn-sm" href={`/posts/${saved.slug}`} target="_blank" rel="noopener"><External size={15} /> View</a>}
@@ -176,6 +173,11 @@ export default function Editor() {
         </div>
       </div>
 
+      {saved && me && saved.authorId !== me.profile.userId && (
+        <div className="alert" style={{ marginBottom: 16, background: 'var(--info-soft)', color: 'var(--info)', borderColor: 'transparent' }}>
+          You’re editing <strong>@{saved.authorHandle}</strong>’s post as an admin. It stays under their name.
+        </div>
+      )}
       <div className="editor">
         <div>
           <textarea
@@ -210,10 +212,12 @@ export default function Editor() {
                 </div>
               )}
               {form.status === 'published' && saved?.publishedAt && <span className="hint">First published {formatDateTime(saved.publishedAt)}</span>}
-              <label className="switch">
-                <span>Feature on the home page</span>
-                <input type="checkbox" checked={form.featured} onChange={(e) => set('featured', e.target.checked)} />
-              </label>
+              {isAdmin && (
+                <label className="switch">
+                  <span>Feature on the home page <span className="hint">(admin)</span></span>
+                  <input type="checkbox" checked={form.featured} onChange={(e) => set('featured', e.target.checked)} />
+                </label>
+              )}
             </div>
           </div>
 
@@ -261,10 +265,6 @@ export default function Editor() {
               <div className="field">
                 <span className="label">Tags</span>
                 <TagInput value={form.tags} onChange={(t) => set('tags', t)} />
-              </div>
-              <div className="field">
-                <label htmlFor="author">Author</label>
-                <input id="author" className="input" value={form.author} onChange={(e) => set('author', e.target.value)} maxLength={80} />
               </div>
             </div>
           </div>

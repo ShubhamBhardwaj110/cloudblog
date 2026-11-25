@@ -14,6 +14,7 @@ resource "aws_sns_topic_subscription" "email" {
 locals {
   functions = {
     public    = module.public_api.function_name
+    app       = module.app_api.function_name
     admin     = module.admin_api.function_name
     publisher = module.publisher.function_name
   }

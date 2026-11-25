@@ -1,11 +1,17 @@
 import { Link } from 'react-router';
 import type { PostSummary } from '../lib/api';
 import { formatDate } from '../lib/format';
-import { Cover } from './ui';
+import { Avatar, Cover } from './ui';
 
-export function PostMeta({ post }: { post: PostSummary }) {
+export function PostMeta({ post, showAuthor = true }: { post: PostSummary; showAuthor?: boolean }) {
   return (
     <div className="meta">
+      {showAuthor && (
+        <>
+          <span className="card-author"><Avatar name={post.author} src={post.authorAvatar} size={22} />{post.author}</span>
+          <span className="dot" />
+        </>
+      )}
       <time dateTime={post.publishedAt}>{formatDate(post.publishedAt)}</time>
       <span className="dot" />
       <span>{post.readingMinutes} min read</span>
@@ -13,14 +19,14 @@ export function PostMeta({ post }: { post: PostSummary }) {
   );
 }
 
-export function PostCard({ post }: { post: PostSummary }) {
+export function PostCard({ post, showAuthor = true }: { post: PostSummary; showAuthor?: boolean }) {
   return (
     <Link to={`/posts/${post.slug}`} className="card">
       <Cover post={post} />
       <div className="kicker">{post.category}</div>
       <h3>{post.title}</h3>
       <p>{post.excerpt}</p>
-      <PostMeta post={post} />
+      <PostMeta post={post} showAuthor={showAuthor} />
     </Link>
   );
 }

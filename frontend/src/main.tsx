@@ -6,10 +6,13 @@ import './styles/article.css';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { createBrowserRouter, RouterProvider } from 'react-router';
+import { createBrowserRouter, Navigate, RouterProvider } from 'react-router';
 import Layout from './components/Layout';
 import { Spinner, ToastProvider } from './components/ui';
 import { loadConfig } from './lib/config';
+import { SessionProvider } from './lib/session';
+import AuthCallback from './pages/AuthCallback';
+import AuthorPage from './pages/AuthorPage';
 import Home from './pages/Home';
 import NotFound from './pages/NotFound';
 import PostPage from './pages/PostPage';
@@ -27,15 +30,18 @@ const router = createBrowserRouter([
     children: [
       { index: true, Component: Home },
       { path: 'posts/:slug', Component: PostPage },
+      { path: 'auth/callback', Component: AuthCallback },
+      { path: ':profile', Component: AuthorPage }, // "/@handle"
       { path: '*', Component: NotFound },
     ],
   },
   {
-    // Editor, auth and admin screens load only when someone visits /admin.
-    path: '/admin/*',
-    lazy: async () => ({ Component: (await import('./admin/AdminApp')).default }),
-    HydrateFallback: () => <div className="center-page"><Spinner label="Loading admin" /></div>,
+    // The editor and dashboards load only when someone opens the studio.
+    path: '/studio/*',
+    lazy: async () => ({ Component: (await import('./studio/StudioApp')).default }),
+    HydrateFallback: () => <div className="center-page"><Spinner label="Loading studio" /></div>,
   },
+  { path: '/admin/*', element: <Navigate to="/studio/admin" replace /> },
 ]);
 
 const root = createRoot(document.getElementById('root')!);
@@ -45,9 +51,11 @@ loadConfig()
     root.render(
       <StrictMode>
         <QueryClientProvider client={queryClient}>
-          <ToastProvider>
-            <RouterProvider router={router} />
-          </ToastProvider>
+          <SessionProvider>
+            <ToastProvider>
+              <RouterProvider router={router} />
+            </ToastProvider>
+          </SessionProvider>
         </QueryClientProvider>
       </StrictMode>,
     );

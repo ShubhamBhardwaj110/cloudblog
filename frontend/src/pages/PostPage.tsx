@@ -2,12 +2,14 @@ import { useQuery } from '@tanstack/react-query';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router';
 import Comments from '../components/Comments';
-import { LinkIcon, LinkedIn, XLogo } from '../components/Icons';
+import { LinkIcon, LinkedIn, Pencil, XLogo } from '../components/Icons';
+import ReportButton from '../components/ReportDialog';
 import { PostCard } from '../components/PostCard';
 import { Avatar, Cover, usePageMeta, useToast } from '../components/ui';
 import { ApiError, publicApi } from '../lib/api';
 import { formatCount, formatDate } from '../lib/format';
 import { type Heading, renderMarkdown } from '../lib/markdown';
+import { useSession } from '../lib/session';
 import { postsQuery } from './Home';
 import NotFound from './NotFound';
 
@@ -58,7 +60,7 @@ function Toc({ headings }: { headings: Heading[] }) {
   );
 }
 
-function Share({ title }: { title: string }) {
+function Share({ title, slug }: { title: string; slug: string }) {
   const toast = useToast();
   const url = window.location.href.split('#')[0]!;
   const copy = async () => {
@@ -76,6 +78,7 @@ function Share({ title }: { title: string }) {
       <button className="icon-btn" onClick={copy} aria-label="Copy link"><LinkIcon /></button>
       <a className="icon-btn" href={`https://x.com/intent/post?text=${e(title)}&url=${e(url)}`} target="_blank" rel="noopener noreferrer" aria-label="Share on X"><XLogo /></a>
       <a className="icon-btn" href={`https://www.linkedin.com/sharing/share-offsite/?url=${e(url)}`} target="_blank" rel="noopener noreferrer" aria-label="Share on LinkedIn"><LinkedIn /></a>
+      <ReportButton slug={slug} />
     </div>
   );
 }
@@ -90,6 +93,7 @@ export default function PostPage() {
   });
   const { data: all } = useQuery(postsQuery);
   const [views, setViews] = useState<number>();
+  const { me, isAdmin } = useSession();
   useReadingProgress(progress);
   usePageMeta(post?.title, post?.excerpt);
 
@@ -141,9 +145,9 @@ export default function PostPage() {
           <h1>{post.title}</h1>
           {post.excerpt && <p className="dek">{post.excerpt}</p>}
           <div className="byline">
-            <Avatar name={post.author} />
+            <Link to={`/@${post.authorHandle}`}><Avatar name={post.author} src={post.authorAvatar} /></Link>
             <div>
-              <strong>{post.author}</strong>
+              <Link to={`/@${post.authorHandle}`}><strong>{post.author}</strong></Link>
               <div className="meta">
                 <time dateTime={post.publishedAt}>{formatDate(post.publishedAt)}</time>
                 <span className="dot" />
@@ -151,6 +155,9 @@ export default function PostPage() {
                 {shownViews > 0 && (<><span className="dot" /><span>{formatCount(shownViews)} views</span></>)}
               </div>
             </div>
+            {(isAdmin || me?.profile.userId === post.authorId) && (
+              <Link to={`/studio/posts/${post.postId}`} className="btn btn-sm" style={{ marginLeft: 8 }}><Pencil size={14} /> Edit</Link>
+            )}
           </div>
         </header>
 
@@ -173,7 +180,7 @@ export default function PostPage() {
               {post.tags.map((t) => <Link key={t} to={`/?tag=${encodeURIComponent(t)}`} className="chip">#{t}</Link>)}
             </div>
           )}
-          <Share title={post.title} />
+          <Share title={post.title} slug={post.slug} />
           <Comments slug={post.slug} />
         </div>
       </article>

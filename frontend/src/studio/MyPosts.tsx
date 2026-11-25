@@ -3,9 +3,10 @@ import { useState } from 'react';
 import { Link } from 'react-router';
 import { External, Pencil, Plus, Trash } from '../components/Icons';
 import { Spinner, useToast } from '../components/ui';
-import type { PostStatus, PostSummary } from '../lib/api';
+import { errorMessage, type PostStatus, type PostSummary } from '../lib/api';
 import { formatCount, formatDateTime, timeAgo } from '../lib/format';
-import { useAdminApi, useInvalidate } from './useAdminApi';
+import { useSession } from '../lib/session';
+import { useInvalidate } from './hooks';
 
 type Filter = 'all' | PostStatus;
 
@@ -14,39 +15,43 @@ export function StatusPill({ post }: { post: Pick<PostSummary, 'status' | 'publi
   return <span className={`pill pill-${post.status}`}>{label}</span>;
 }
 
-export default function PostsList() {
-  const api = useAdminApi();
+export function StatusTabs({ posts, filter, setFilter }: { posts?: PostSummary[]; filter: Filter; setFilter: (f: Filter) => void }) {
+  const count = (s: Filter) => (posts ?? []).filter((p) => s === 'all' || p.status === s).length;
+  return (
+    <div className="tabs" role="tablist">
+      {(['all', 'published', 'draft', 'scheduled'] as Filter[]).map((f) => (
+        <button key={f} role="tab" aria-selected={filter === f} onClick={() => setFilter(f)}>
+          {f[0]!.toUpperCase() + f.slice(1)} {posts && <span className="hint">{count(f)}</span>}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export default function MyPosts() {
+  const { api } = useSession();
   const toast = useToast();
   const invalidate = useInvalidate();
   const [filter, setFilter] = useState<Filter>('all');
-  const { data: posts, isPending, error } = useQuery({ queryKey: ['admin', 'posts'], queryFn: () => api.posts() });
+  const { data: posts, isPending, error } = useQuery({ queryKey: ['studio', 'posts'], queryFn: () => api!.posts() });
 
   const remove = useMutation({
-    mutationFn: (p: PostSummary) => api.remove(p.postId),
+    mutationFn: (p: PostSummary) => api!.remove(p.postId),
     onSuccess: (_d, p) => { toast(`Deleted “${p.title}”`); invalidate(); },
-    onError: (e) => toast((e as Error).message, 'error'),
+    onError: (e) => toast(errorMessage(e), 'error'),
   });
 
   const shown = (posts ?? []).filter((p) => filter === 'all' || p.status === filter);
-  const count = (s: Filter) => (posts ?? []).filter((p) => s === 'all' || p.status === s).length;
 
   return (
     <>
       <div className="admin-head">
-        <h1>Posts</h1>
-        <Link to="/admin/posts/new" className="btn btn-primary"><Plus size={16} /> New post</Link>
+        <h1>My posts</h1>
+        <Link to="/studio/new" className="btn btn-primary"><Plus size={16} /> New post</Link>
       </div>
 
       <div className="panel">
-        <div className="panel-head">
-          <div className="tabs" role="tablist">
-            {(['all', 'published', 'draft', 'scheduled'] as Filter[]).map((f) => (
-              <button key={f} role="tab" aria-selected={filter === f} onClick={() => setFilter(f)}>
-                {f[0]!.toUpperCase() + f.slice(1)} {posts && <span className="hint">{count(f)}</span>}
-              </button>
-            ))}
-          </div>
-        </div>
+        <div className="panel-head"><StatusTabs posts={posts} filter={filter} setFilter={setFilter} /></div>
         {error && <div className="alert alert-error" style={{ margin: 16 }}>{(error as Error).message}</div>}
         {isPending ? (
           <div style={{ padding: 24 }}><Spinner label="Loading posts" /></div>
@@ -62,7 +67,7 @@ export default function PostsList() {
                 {shown.map((p) => (
                   <tr key={p.postId}>
                     <td className="title-cell">
-                      <Link to={`/admin/posts/${p.postId}`}>{p.title}</Link>
+                      <Link to={`/studio/posts/${p.postId}`}>{p.title}</Link>
                       <small>{p.category} · /posts/{p.slug}</small>
                     </td>
                     <td><StatusPill post={p} /></td>
@@ -73,7 +78,7 @@ export default function PostsList() {
                         {p.status === 'published' && (
                           <a className="btn btn-sm btn-ghost" href={`/posts/${p.slug}`} target="_blank" rel="noopener" aria-label="View live"><External size={15} /></a>
                         )}
-                        <Link className="btn btn-sm btn-ghost" to={`/admin/posts/${p.postId}`} aria-label="Edit"><Pencil size={15} /></Link>
+                        <Link className="btn btn-sm btn-ghost" to={`/studio/posts/${p.postId}`} aria-label="Edit"><Pencil size={15} /></Link>
                         <button
                           className="btn btn-sm btn-ghost btn-danger"
                           aria-label="Delete"

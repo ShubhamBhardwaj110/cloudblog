@@ -4,7 +4,15 @@ import { slugify } from './text.js';
 export const POST_STATUSES = ['draft', 'published', 'scheduled'] as const;
 export type PostStatus = (typeof POST_STATUSES)[number];
 
-export interface Post {
+/** Author details copied onto each post so listings never need a join. */
+export interface AuthorRef {
+  authorId: string; // Cognito sub
+  author: string; // display name
+  authorHandle: string;
+  authorAvatar?: string;
+}
+
+export interface Post extends AuthorRef {
   postId: string;
   slug: string;
   title: string;
@@ -14,7 +22,6 @@ export interface Post {
   coverAlt?: string;
   category: string;
   tags: string[];
-  author: string;
   status: PostStatus;
   /** Set for published/scheduled posts only, so drafts stay out of the status index. */
   publishedAt?: string;
@@ -28,34 +35,95 @@ export type PostSummary = Omit<Post, 'content'>;
 
 export const SUMMARY_FIELDS = [
   'postId', 'slug', 'title', 'excerpt', 'coverImage', 'coverAlt', 'category', 'tags',
-  'author', 'status', 'publishedAt', 'createdAt', 'updatedAt', 'readingMinutes', 'featured',
+  'authorId', 'author', 'authorHandle', 'authorAvatar',
+  'status', 'publishedAt', 'createdAt', 'updatedAt', 'readingMinutes', 'featured',
 ] as const satisfies readonly (keyof PostSummary)[];
-
-export type CommentStatus = 'pending' | 'approved';
 
 export interface Comment {
   postId: string;
   /** Sort key: `${createdAt}#${commentId}` keeps comments chronological per post. */
   commentKey: string;
   commentId: string;
+  authorId: string;
   author: string;
+  authorHandle?: string;
+  authorAvatar?: string;
   content: string;
-  status: CommentStatus;
+  /** Constant partition for the "recent comments" index used by admins. */
+  status: 'visible';
   createdAt: string;
   postSlug: string;
   postTitle: string;
+  postAuthorId: string;
 }
 
-/** Public shape: no moderation internals. */
 export const publicComment = (c: Comment) => ({
   commentId: c.commentId,
+  commentKey: c.commentKey,
+  authorId: c.authorId,
   author: c.author,
+  authorHandle: c.authorHandle,
+  authorAvatar: c.authorAvatar,
   content: c.content,
   createdAt: c.createdAt,
 });
 
+export interface Profile {
+  userId: string;
+  handle: string;
+  displayName: string;
+  bio: string;
+  avatarUrl?: string;
+  website?: string;
+  status: 'active' | 'suspended';
+  /** False until the user has confirmed their handle and name once. */
+  onboarded: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const publicProfile = (p: Profile) => ({
+  userId: p.userId,
+  handle: p.handle,
+  displayName: p.displayName,
+  bio: p.bio,
+  avatarUrl: p.avatarUrl,
+  website: p.website,
+  createdAt: p.createdAt,
+});
+
+export const toAuthorRef = (p: Profile): AuthorRef => ({
+  authorId: p.userId,
+  author: p.displayName,
+  authorHandle: p.handle,
+  authorAvatar: p.avatarUrl,
+});
+
+// ---------- Input validation ----------
+
 const trimmed = (min: number, max: number) => z.string().trim().min(min).max(max);
 const httpsUrl = z.string().trim().max(1000).refine((v) => v === '' || /^https:\/\/[^\s]+$/i.test(v), 'Must be an https:// URL');
+
+export const RESERVED_HANDLES = new Set([
+  'admin', 'administrator', 'api', 'about', 'auth', 'blog', 'help', 'login', 'logout', 'me', 'media', 'moderator',
+  'new', 'posts', 'root', 'rss', 'settings', 'signup', 'sitemap', 'staff', 'studio', 'support', 'system', 'write',
+]);
+
+export const handleSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .regex(/^[a-z0-9](?:[a-z0-9_]{1,22}[a-z0-9])?$/, '3–24 characters: letters, numbers and underscores')
+  .refine((h) => !RESERVED_HANDLES.has(h), 'That handle is reserved');
+
+export const profileInputSchema = z.object({
+  handle: handleSchema,
+  displayName: trimmed(1, 60),
+  bio: z.string().trim().max(280).default(''),
+  avatarUrl: httpsUrl.optional(),
+  website: httpsUrl.optional(),
+});
+export type ProfileInput = z.infer<typeof profileInputSchema>;
 
 export const postInputSchema = z
   .object({
@@ -71,7 +139,6 @@ export const postInputSchema = z
       .max(10)
       .default([])
       .transform((tags) => [...new Set(tags.filter(Boolean).map(slugify))]),
-    author: trimmed(1, 80),
     status: z.enum(POST_STATUSES).default('draft'),
     publishedAt: z.iso.datetime({ offset: true }).optional(),
     featured: z.boolean().default(false),
@@ -80,18 +147,15 @@ export const postInputSchema = z
     message: 'publishedAt is required when scheduling a post',
     path: ['publishedAt'],
   });
-
 export type PostInput = z.infer<typeof postInputSchema>;
 
 export const commentInputSchema = z.object({
-  author: trimmed(1, 60),
   content: trimmed(2, 2000),
-  /** Honeypot: hidden in the UI, so humans leave it empty and bots fill it in. */
-  website: z.string().optional(),
 });
 
-export const commentModerationSchema = z.object({
-  status: z.enum(['approved', 'pending']),
+export const reportInputSchema = z.object({
+  reason: z.enum(['spam', 'abuse', 'illegal', 'copyright', 'other']),
+  details: z.string().trim().max(1000).default(''),
 });
 
 const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif'] as const;

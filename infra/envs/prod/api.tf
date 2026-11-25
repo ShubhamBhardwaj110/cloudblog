@@ -19,7 +19,7 @@ resource "aws_apigatewayv2_authorizer" "cognito" {
   identity_sources = ["$request.header.Authorization"]
 
   jwt_configuration {
-    issuer   = "https://${aws_cognito_user_pool.admins.endpoint}"
+    issuer   = "https://${aws_cognito_user_pool.users.endpoint}"
     audience = [aws_cognito_user_pool_client.web.id]
   }
 }
@@ -27,30 +27,45 @@ resource "aws_apigatewayv2_authorizer" "cognito" {
 locals {
   lambdas = {
     public = module.public_api
+    app    = module.app_api
     admin  = module.admin_api
   }
 
-  public_routes = [
-    "GET /posts",
-    "GET /posts/{slug}",
-    "POST /posts/{slug}/views",
-    "GET /posts/{slug}/comments",
-    "POST /posts/{slug}/comments",
-  ]
-
-  admin_routes = [
-    "GET /admin/stats",
-    "GET /admin/posts",
-    "GET /admin/posts/{postId}",
-    "POST /admin/posts",
-    "PUT /admin/posts/{postId}",
-    "DELETE /admin/posts/{postId}",
-    "GET /admin/comments",
-    "PATCH /admin/comments/{postId}/{commentKey}",
-    "DELETE /admin/comments/{postId}/{commentKey}",
-    "POST /admin/uploads",
-    "POST /admin/rebuild",
-  ]
+  # route => integration. Routes on "app" and "admin" require a valid Cognito ID token.
+  routes = merge(
+    { for r in [
+      "GET /posts",
+      "GET /posts/{slug}",
+      "POST /posts/{slug}/views",
+      "GET /posts/{slug}/comments",
+      "GET /authors/{handle}",
+    ] : r => "public" },
+    { for r in [
+      "GET /me",
+      "PUT /me",
+      "GET /me/stats",
+      "GET /me/posts",
+      "GET /me/posts/{postId}",
+      "POST /me/posts",
+      "PUT /me/posts/{postId}",
+      "DELETE /me/posts/{postId}",
+      "POST /me/uploads",
+      "POST /posts/{slug}/comments",
+      "DELETE /posts/{slug}/comments/{commentKey}",
+      "POST /posts/{slug}/report",
+    ] : r => "app" },
+    { for r in [
+      "GET /admin/stats",
+      "GET /admin/posts",
+      "POST /admin/posts/{postId}/unpublish",
+      "DELETE /admin/posts/{postId}",
+      "GET /admin/comments",
+      "GET /admin/users",
+      "POST /admin/users/{userId}/suspend",
+      "POST /admin/users/{userId}/unsuspend",
+      "POST /admin/rebuild",
+    ] : r => "admin" },
+  )
 }
 
 resource "aws_apigatewayv2_integration" "this" {
@@ -62,20 +77,13 @@ resource "aws_apigatewayv2_integration" "this" {
   timeout_milliseconds   = 10000
 }
 
-resource "aws_apigatewayv2_route" "public" {
-  for_each  = toset(local.public_routes)
-  api_id    = aws_apigatewayv2_api.this.id
-  route_key = each.value
-  target    = "integrations/${aws_apigatewayv2_integration.this["public"].id}"
-}
-
-resource "aws_apigatewayv2_route" "admin" {
-  for_each           = toset(local.admin_routes)
+resource "aws_apigatewayv2_route" "this" {
+  for_each           = local.routes
   api_id             = aws_apigatewayv2_api.this.id
-  route_key          = each.value
-  target             = "integrations/${aws_apigatewayv2_integration.this["admin"].id}"
-  authorization_type = "JWT"
-  authorizer_id      = aws_apigatewayv2_authorizer.cognito.id
+  route_key          = each.key
+  target             = "integrations/${aws_apigatewayv2_integration.this[each.value].id}"
+  authorization_type = each.value == "public" ? "NONE" : "JWT"
+  authorizer_id      = each.value == "public" ? null : aws_apigatewayv2_authorizer.cognito.id
 }
 
 resource "aws_cloudwatch_log_group" "api_access" {
@@ -96,6 +104,18 @@ resource "aws_apigatewayv2_stage" "default" {
 
   route_settings {
     route_key              = "POST /posts/{slug}/comments"
+    throttling_burst_limit = 5
+    throttling_rate_limit  = 2
+  }
+
+  route_settings {
+    route_key              = "POST /posts/{slug}/report"
+    throttling_burst_limit = 2
+    throttling_rate_limit  = 1
+  }
+
+  route_settings {
+    route_key              = "POST /me/posts"
     throttling_burst_limit = 5
     throttling_rate_limit  = 1
   }
@@ -119,7 +139,7 @@ resource "aws_apigatewayv2_stage" "default" {
     })
   }
 
-  depends_on = [aws_apigatewayv2_route.public, aws_apigatewayv2_route.admin]
+  depends_on = [aws_apigatewayv2_route.this]
 }
 
 resource "aws_lambda_permission" "api" {

@@ -19,10 +19,14 @@ output "frontend_config" {
   value = {
     apiUrl        = aws_apigatewayv2_api.this.api_endpoint
     region        = var.region
-    userPoolId    = aws_cognito_user_pool.admins.id
+    userPoolId    = aws_cognito_user_pool.users.id
     clientId      = aws_cognito_user_pool_client.web.id
-    cognitoDomain = "https://${aws_cognito_user_pool_domain.admins.domain}.auth.${var.region}.amazoncognito.com"
+    cognitoDomain = "https://${aws_cognito_user_pool_domain.users.domain}.auth.${var.region}.amazoncognito.com"
     siteTitle     = var.site_title
     siteTagline   = var.site_description
   }
+}
+
+output "user_pool_id" {
+  value = aws_cognito_user_pool.users.id
 }

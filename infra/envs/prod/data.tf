@@ -24,6 +24,14 @@ resource "aws_dynamodb_table" "posts" {
     name = "publishedAt"
     type = "S"
   }
+  attribute {
+    name = "authorId"
+    type = "S"
+  }
+  attribute {
+    name = "updatedAt"
+    type = "S"
+  }
 
   # Lookup by URL slug.
   global_secondary_index {
@@ -50,7 +58,25 @@ resource "aws_dynamodb_table" "posts" {
     projection_type = "INCLUDE"
     non_key_attributes = [
       "slug", "title", "excerpt", "coverImage", "coverAlt", "category", "tags",
-      "author", "createdAt", "updatedAt", "readingMinutes", "featured",
+      "authorId", "author", "authorHandle", "authorAvatar", "createdAt", "updatedAt", "readingMinutes", "featured",
+    ]
+  }
+
+  # A writer's own posts (any status), most recently edited first. Also powers author pages.
+  global_secondary_index {
+    name = "author-index"
+    key_schema {
+      attribute_name = "authorId"
+      key_type       = "HASH"
+    }
+    key_schema {
+      attribute_name = "updatedAt"
+      key_type       = "RANGE"
+    }
+    projection_type = "INCLUDE"
+    non_key_attributes = [
+      "slug", "title", "excerpt", "coverImage", "coverAlt", "category", "tags", "status", "publishedAt",
+      "author", "authorHandle", "authorAvatar", "createdAt", "readingMinutes", "featured",
     ]
   }
 
@@ -93,7 +119,7 @@ resource "aws_dynamodb_table" "comments" {
     type = "S"
   }
 
-  # Moderation queue: all pending comments across posts, newest first.
+  # Admin view: newest comments across all posts.
   global_secondary_index {
     name = "status-index"
     key_schema {
@@ -133,6 +159,54 @@ resource "aws_dynamodb_table" "views" {
   }
 
   # Hard ceiling on request rate: a runaway script or attack can't produce a surprise bill.
+  on_demand_throughput {
+    max_read_request_units  = 200
+    max_write_request_units = 50
+  }
+
+  server_side_encryption {
+    enabled = true
+  }
+}
+
+# One item per user: handle, display name, bio, avatar, status (active/suspended).
+resource "aws_dynamodb_table" "profiles" {
+  name                        = "${local.name}-profiles"
+  billing_mode                = "PAY_PER_REQUEST"
+  hash_key                    = "userId" # Cognito sub
+  deletion_protection_enabled = true
+
+  attribute {
+    name = "userId"
+    type = "S"
+  }
+
+  point_in_time_recovery {
+    enabled = true
+  }
+
+  on_demand_throughput {
+    max_read_request_units  = 200
+    max_write_request_units = 50
+  }
+
+  server_side_encryption {
+    enabled = true
+  }
+}
+
+# handle -> userId. Conditional writes here guarantee handles are unique.
+resource "aws_dynamodb_table" "handles" {
+  name                        = "${local.name}-handles"
+  billing_mode                = "PAY_PER_REQUEST"
+  hash_key                    = "handle"
+  deletion_protection_enabled = true
+
+  attribute {
+    name = "handle"
+    type = "S"
+  }
+
   on_demand_throughput {
     max_read_request_units  = 200
     max_write_request_units = 50

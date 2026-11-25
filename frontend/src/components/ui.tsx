@@ -19,7 +19,10 @@ export function Cover({ post, eager = false, className = '' }: { post: Pick<Post
   );
 }
 
-export function Avatar({ name, size = 40 }: { name: string; size?: number }) {
+export function Avatar({ name, src, size = 40 }: { name: string; src?: string; size?: number }) {
+  if (src) {
+    return <img className="avatar" src={src} alt="" width={size} height={size} style={{ width: size, height: size, objectFit: 'cover' }} loading="lazy" />;
+  }
   const initials = name.split(/\s+/).map((w) => w[0]).filter(Boolean).slice(0, 2).join('').toUpperCase();
   return (
     <span className="avatar" style={{ background: coverGradient(name), width: size, height: size, fontSize: size * 0.38 }} aria-hidden="true">

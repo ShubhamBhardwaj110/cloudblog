@@ -50,7 +50,7 @@ export function renderPostPage(template: string, post: Post, site: SiteInfo): st
       image: image ? [image] : undefined,
       datePublished: post.publishedAt,
       dateModified: post.updatedAt,
-      author: { '@type': 'Person', name: post.author },
+      author: { '@type': 'Person', name: post.author, url: `${site.url}/@${post.authorHandle}` },
       mainEntityOfPage: url,
       keywords: post.tags.join(', '),
     })}</script>`,
@@ -61,7 +61,7 @@ export function renderPostPage(template: string, post: Post, site: SiteInfo): st
   const article = `<article class="prerender">
       <p>${escapeHtml(post.category)}</p>
       <h1>${escapeHtml(post.title)}</h1>
-      <p>By ${escapeHtml(post.author)}${post.publishedAt ? ` · <time datetime="${post.publishedAt}">${post.publishedAt.slice(0, 10)}</time>` : ''}</p>
+      <p>By <a href="/@${escapeHtml(post.authorHandle)}">${escapeHtml(post.author)}</a>${post.publishedAt ? ` · <time datetime="${post.publishedAt}">${post.publishedAt.slice(0, 10)}</time>` : ''}</p>
       ${image ? `<img src="${escapeHtml(image)}" alt="${escapeHtml(post.coverAlt ?? '')}">` : ''}
       ${renderMarkdown(post.content)}
     </article>`;
@@ -81,6 +81,7 @@ export function renderSitemap(posts: PostSummary[], site: SiteInfo): string {
     ...posts.map(
       (p) => `  <url><loc>${xml(postUrl(site, p.slug))}</loc><lastmod>${p.updatedAt.slice(0, 10)}</lastmod></url>`,
     ),
+    ...[...new Set(posts.map((p) => p.authorHandle))].map((h) => `  <url><loc>${xml(site.url)}/@${xml(h)}</loc></url>`),
   ];
   return `<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
@@ -116,5 +117,5 @@ ${items.join('\n')}
 }
 
 export function renderRobots(site: SiteInfo): string {
-  return `User-agent: *\nDisallow: /admin\nSitemap: ${site.url}/sitemap.xml\n`;
+  return `User-agent: *\nDisallow: /studio\nDisallow: /auth\nSitemap: ${site.url}/sitemap.xml\n`;
 }

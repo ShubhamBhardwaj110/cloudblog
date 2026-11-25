@@ -1,12 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import { DeleteCommand, GetCommand, PutCommand, QueryCommand, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import type { User } from './auth.js';
 import { ddb } from './db.js';
 import { env } from './env.js';
 import { HttpError, notFound } from './http.js';
-import { type Post, type PostInput, type PostSummary, SUMMARY_FIELDS } from './models.js';
+import { type AuthorRef, type Post, type PostInput, type PostSummary, SUMMARY_FIELDS } from './models.js';
 import { excerpt, readingMinutes, slugify } from './text.js';
 
 const MAX_LIST = 1000;
+/** Writers can create this many posts per rolling 24 hours (spam brake; admins exempt). */
+export const DAILY_POST_LIMIT = 10;
 
 const summaryProjection = () => {
   const names: Record<string, string> = {};
@@ -17,40 +20,63 @@ const summaryProjection = () => {
   return { ProjectionExpression: expr, ExpressionAttributeNames: names };
 };
 
-/** Published posts whose publish time has arrived, newest first. */
-export async function listPublished(now = new Date().toISOString()): Promise<PostSummary[]> {
-  const items: PostSummary[] = [];
+async function queryAll<T>(input: ConstructorParameters<typeof QueryCommand>[0], max = MAX_LIST): Promise<T[]> {
+  const items: T[] = [];
   let ExclusiveStartKey: Record<string, unknown> | undefined;
   do {
-    const res = await ddb.send(
-      new QueryCommand({
-        TableName: env.postsTable,
-        IndexName: 'status-index',
-        KeyConditionExpression: '#status = :published AND publishedAt <= :now',
-        ExpressionAttributeNames: { '#status': 'status' },
-        ExpressionAttributeValues: { ':published': 'published', ':now': now },
-        ScanIndexForward: false,
-        ExclusiveStartKey,
-      }),
-    );
-    items.push(...((res.Items ?? []) as PostSummary[]));
+    const res = await ddb.send(new QueryCommand({ ...input, ExclusiveStartKey }));
+    items.push(...((res.Items ?? []) as T[]));
     ExclusiveStartKey = res.LastEvaluatedKey;
-  } while (ExclusiveStartKey && items.length < MAX_LIST);
+  } while (ExclusiveStartKey && items.length < max);
   return items;
 }
 
+/** Published posts whose publish time has arrived, newest first. */
+export function listPublished(now = new Date().toISOString()): Promise<PostSummary[]> {
+  return queryAll<PostSummary>({
+    TableName: env.postsTable,
+    IndexName: 'status-index',
+    KeyConditionExpression: '#status = :published AND publishedAt <= :now',
+    ExpressionAttributeNames: { '#status': 'status' },
+    ExpressionAttributeValues: { ':published': 'published', ':now': now },
+    ScanIndexForward: false,
+  });
+}
+
 /** Scheduled posts that are due to go live. */
-export async function listDueScheduled(now = new Date().toISOString()): Promise<PostSummary[]> {
+export function listDueScheduled(now = new Date().toISOString()): Promise<PostSummary[]> {
+  return queryAll<PostSummary>({
+    TableName: env.postsTable,
+    IndexName: 'status-index',
+    KeyConditionExpression: '#status = :scheduled AND publishedAt <= :now',
+    ExpressionAttributeNames: { '#status': 'status' },
+    ExpressionAttributeValues: { ':scheduled': 'scheduled', ':now': now },
+  });
+}
+
+/** Every post by one author (any status), most recently edited first. */
+export function listByAuthor(authorId: string): Promise<PostSummary[]> {
+  return queryAll<PostSummary>({
+    TableName: env.postsTable,
+    IndexName: 'author-index',
+    KeyConditionExpression: 'authorId = :a',
+    ExpressionAttributeValues: { ':a': authorId },
+    ScanIndexForward: false,
+  });
+}
+
+export async function countCreatedSince(authorId: string, sinceIso: string): Promise<number> {
   const res = await ddb.send(
     new QueryCommand({
       TableName: env.postsTable,
-      IndexName: 'status-index',
-      KeyConditionExpression: '#status = :scheduled AND publishedAt <= :now',
-      ExpressionAttributeNames: { '#status': 'status' },
-      ExpressionAttributeValues: { ':scheduled': 'scheduled', ':now': now },
+      IndexName: 'author-index',
+      KeyConditionExpression: 'authorId = :a AND updatedAt >= :since',
+      FilterExpression: 'createdAt >= :since',
+      ExpressionAttributeValues: { ':a': authorId, ':since': sinceIso },
+      Select: 'COUNT',
     }),
   );
-  return (res.Items ?? []) as PostSummary[];
+  return res.Count ?? 0;
 }
 
 export async function listAll(): Promise<PostSummary[]> {
@@ -93,6 +119,15 @@ export async function getLiveBySlug(slug: string): Promise<Post> {
   return post;
 }
 
+export const canEdit = (post: Pick<Post, 'authorId'>, user: User) => user.isAdmin || post.authorId === user.sub;
+
+/** Load a post the user may edit, or fail with 404 (never reveal other people's drafts). */
+export async function getEditable(postId: string, user: User): Promise<Post> {
+  const post = await getById(postId);
+  if (!post || !canEdit(post, user)) throw notFound('Post');
+  return post;
+}
+
 async function uniqueSlug(base: string, selfId?: string): Promise<string> {
   let candidate = base;
   for (let i = 2; i < 50; i++) {
@@ -117,13 +152,19 @@ function resolvePublishedAt(input: PostInput, existing?: Post): string | undefin
   }
 }
 
-function build(input: PostInput, base: { postId: string; slug: string; createdAt: string }, existing?: Post): Post {
+function build(
+  input: PostInput,
+  base: { postId: string; slug: string; createdAt: string; author: AuthorRef; featured: boolean },
+  existing?: Post,
+): Post {
   const now = new Date().toISOString();
   const publishedAt = resolvePublishedAt(input, existing);
   // "Published" with a future date is really a scheduled post.
   const status = input.status === 'published' && publishedAt && publishedAt > now ? 'scheduled' : input.status;
   return {
-    ...base,
+    postId: base.postId,
+    slug: base.slug,
+    ...base.author,
     title: input.title,
     excerpt: input.excerpt || excerpt(input.content),
     content: input.content,
@@ -131,31 +172,52 @@ function build(input: PostInput, base: { postId: string; slug: string; createdAt
     coverAlt: input.coverAlt || undefined,
     category: input.category,
     tags: input.tags,
-    author: input.author,
     status,
     publishedAt,
     createdAt: base.createdAt,
     updatedAt: now,
     readingMinutes: readingMinutes(input.content),
-    featured: input.featured,
+    featured: base.featured,
   };
 }
 
-export async function create(input: PostInput): Promise<Post> {
+export async function create(input: PostInput, author: AuthorRef, user: User): Promise<Post> {
+  if (!user.isAdmin) {
+    const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+    if ((await countCreatedSince(author.authorId, since)) >= DAILY_POST_LIMIT) {
+      throw new HttpError(429, `You can create up to ${DAILY_POST_LIMIT} posts per day. Please try again tomorrow.`);
+    }
+  }
   const slug = await uniqueSlug(slugify(input.slug || input.title));
-  const post = build(input, { postId: randomUUID(), slug, createdAt: new Date().toISOString() });
+  const post = build(input, {
+    postId: randomUUID(),
+    slug,
+    createdAt: new Date().toISOString(),
+    author,
+    featured: user.isAdmin && input.featured, // only admins curate the home page
+  });
   await ddb.send(
     new PutCommand({ TableName: env.postsTable, Item: post, ConditionExpression: 'attribute_not_exists(postId)' }),
   );
   return post;
 }
 
-export async function update(postId: string, input: PostInput): Promise<Post> {
-  const existing = await getById(postId);
-  if (!existing) throw notFound('Post');
+export async function update(postId: string, input: PostInput, user: User): Promise<Post> {
+  const existing = await getEditable(postId, user);
   const requested = slugify(input.slug || existing.slug);
   const slug = requested === existing.slug ? existing.slug : await uniqueSlug(requested, postId);
-  const post = build(input, { postId, slug, createdAt: existing.createdAt }, existing);
+  const post = build(
+    input,
+    {
+      postId,
+      slug,
+      createdAt: existing.createdAt,
+      // Ownership never changes on edit, even when an admin edits someone else's post.
+      author: { authorId: existing.authorId, author: existing.author, authorHandle: existing.authorHandle, authorAvatar: existing.authorAvatar },
+      featured: user.isAdmin ? input.featured : existing.featured,
+    },
+    existing,
+  );
   try {
     await ddb.send(
       new PutCommand({
@@ -168,11 +230,48 @@ export async function update(postId: string, input: PostInput): Promise<Post> {
     );
   } catch (e) {
     if ((e as Error).name === 'ConditionalCheckFailedException') {
-      throw new HttpError(409, 'This post was changed by someone else. Reload and try again.');
+      throw new HttpError(409, 'This post was changed elsewhere. Reload and try again.');
     }
     throw e;
   }
   return post;
+}
+
+/** Take a post offline (admin moderation, suspension). The author can republish unless suspended. */
+export async function unpublish(postId: string): Promise<void> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: env.postsTable,
+        Key: { postId },
+        UpdateExpression: 'SET #status = :draft, updatedAt = :now REMOVE publishedAt',
+        ConditionExpression: 'attribute_exists(postId)',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: { ':draft': 'draft', ':now': new Date().toISOString() },
+      }),
+    );
+  } catch (e) {
+    if ((e as Error).name === 'ConditionalCheckFailedException') throw notFound('Post');
+    throw e;
+  }
+}
+
+/** Keep the denormalised author name/handle/avatar on posts in sync with the profile. */
+export async function syncAuthor(ref: AuthorRef): Promise<number> {
+  const mine = await listByAuthor(ref.authorId);
+  for (const p of mine) {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: env.postsTable,
+        Key: { postId: p.postId },
+        UpdateExpression: ref.authorAvatar
+          ? 'SET author = :n, authorHandle = :h, authorAvatar = :a'
+          : 'SET author = :n, authorHandle = :h REMOVE authorAvatar',
+        ExpressionAttributeValues: { ':n': ref.author, ':h': ref.authorHandle, ...(ref.authorAvatar ? { ':a': ref.authorAvatar } : {}) },
+      }),
+    );
+  }
+  return mine.length;
 }
 
 export async function publishScheduled(postId: string): Promise<void> {
